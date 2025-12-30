@@ -91,8 +91,11 @@
 			
     <script>
         // Initialize global variables
+		let isFirstLoad = true;
+		let recentRetryCount = 0;
+
         let customTitle = '';
-        let moviesSeriesBoth = 3, shuffleInterval = 10000, plotMaxLength = 450, useTrailers = true;
+        let moviesSeriesBoth = 1, shuffleInterval = 10000, plotMaxLength = 450, useTrailers = true;
         let isChangingSlide = false, player = null, slideChangeTimeout = null, isHomePageActive = false, navigationInterval = null;
         let currentLocation = window.top.location.href;
         let movieList = [], currentMovieIndex = 0, lastMovie = null, currentMovie = null, currentSlideElement = null;
@@ -242,6 +245,11 @@
 
         // Create and display a new slide element for the given movie
         const createSlideElement = async (movie, hasVideo = false) => {
+			if (isFirstLoad) {
+        		console.log("✅ Valid 'Recent' movie displayed. Switching to Random mode for next slides.");
+        		isFirstLoad = false; 
+        		recentRetryCount = 0;
+    		}
             cleanup();
             const container = document.getElementById('slides-container');
             const newSlide = createElem('div', 'slide');
@@ -733,31 +741,74 @@
 							startSlideChangeTimer();
 						})
 						.finally(() => { isChangingSlide = false; });
-				} else {
-					const itemTypes = moviesSeriesBoth === 1 ? 'Movie' : (moviesSeriesBoth === 2 ? 'Series' : 'Movie,Series');
-					fetch(`/Users/${currentUserId}/Items?IncludeItemTypes=${itemTypes}&Recursive=true&Limit=1&SortBy=random&Fields=Id,Overview,RemoteTrailers,PremiereDate,RunTimeTicks,ChildCount,Title,Type,Genres,OfficialRating,CommunityRating&api_key=${token}`)
-						.then(response => {
-							if (!response.ok) throw new Error(`Failed to fetch random movie: ${response.statusText}`);
-							return response.json();
-						})
-						.then(data => {
-							if (data.Items[0]) {
-								console.log("Fetched random movie:", data.Items[0].Name);
-								checkBackdropAndLogo(data.Items[0]);
-							} else {
-								console.warn("No items found in random fetch.");
-								displayError("No movies found to display.");
-								startSlideChangeTimer();
-							}
-						})
-						.catch(error => {
-							console.error("Error fetching random movie:", error);
-							displayError("Failed to load the next movie. Please try again.");
-							startSlideChangeTimer();
-						})
-						.finally(() => { isChangingSlide = false; });
-				}
-			});
+} else {
+    const itemTypes = moviesSeriesBoth === 1 ? 'Movie' : (moviesSeriesBoth === 2 ? 'Series' : 'Movie,Series');
+    
+    if (isFirstLoad) {
+        // LOGIC "LATEST" (Fast: < 200ms)
+        if (recentRetryCount >= 15) {
+            console.log("⚠️ Too many recent items failed. Switching to random.");
+            isFirstLoad = false;
+            fetchNextMovie(); 
+            return;
+        }
+
+        // Optimized URL using /Latest endpoint (No Recursive=true needed)
+        const latestUrl = `/Users/${currentUserId}/Items/Latest?IncludeItemTypes=${itemTypes}&Limit=15&Fields=Id,Overview,RemoteTrailers,PremiereDate,RunTimeTicks,ChildCount,Title,Type,Genres,OfficialRating,CommunityRating&api_key=${token}`;
+
+        console.log(`🚀 Fast Load: Fetching 'Latest' endpoint (Attempt #${recentRetryCount})`);
+
+        fetch(latestUrl)
+            .then(response => {
+                if (!response.ok) throw new Error(`Failed to fetch latest: ${response.statusText}`);
+                return response.json();
+            })
+            .then(dataArray => {
+                // /Latest returns an array directly
+                const candidate = dataArray[recentRetryCount];
+
+                if (candidate) {
+                    console.log(`Fetched candidate from Latest list: ${candidate.Name}`);
+                    recentRetryCount++; // Prepare for next attempt if this one fails validation
+                    checkBackdropAndLogo(candidate);
+                } else {
+                    console.warn("No more recent items found.");
+                    isFirstLoad = false;
+                    startSlideChangeTimer();
+                }
+            })
+            .catch(error => {
+                console.error("Error fetching latest:", error);
+                isFirstLoad = false;
+                startSlideChangeTimer();
+            })
+            .finally(() => { isChangingSlide = false; });
+
+    } else {
+			// LOGIC "RANDOM" (Standard behavior)
+			const randomUrl = `/Users/${currentUserId}/Items?IncludeItemTypes=${itemTypes}&Recursive=true&Limit=1&SortBy=random&Fields=Id,Overview,RemoteTrailers,PremiereDate,RunTimeTicks,ChildCount,Title,Type,Genres,OfficialRating,CommunityRating&api_key=${token}`;
+			
+			fetch(randomUrl)
+				.then(response => {
+					if (!response.ok) throw new Error(`Failed to fetch random: ${response.statusText}`);
+					return response.json();
+				})
+				.then(data => {
+					if (data.Items && data.Items[0]) {
+						console.log("Fetched random movie:", data.Items[0].Name);
+						checkBackdropAndLogo(data.Items[0]);
+					} else {
+						startSlideChangeTimer();
+					}
+				})
+				.catch(error => {
+					console.error("Error fetching random movie:", error);
+					startSlideChangeTimer();
+				})
+				.finally(() => { isChangingSlide = false; });
+			}
+		}
+		});
 		};
 
         // Start a timer to change slides after a specified interval
@@ -900,21 +951,25 @@
 		  }
 		}
 
-        // Initialize the slideshow once the DOM is fully loaded
-        document.addEventListener('DOMContentLoaded', () => {
-            if (window.innerWidth < 701) useTrailers = false;
-            const isHomePage = url => url.includes('/home') || url.endsWith('/web/') || url.endsWith('/web/index.html');
-            if (isHomePage(window.top.location.href)) {
-                isHomePageActive = true;
-                cleanup();
-                fetchRandomMovie();
-                attachButtonListeners();
+
+		(function initSpotlight() {
+			// Immediate mobile check
+			if (window.innerWidth < 701) useTrailers = false;
+
+			const isHomePage = url => url.includes('/home') || url.endsWith('/web/') || url.endsWith('/web/index.html');
+			
+			if (isHomePage(window.top.location.href)) {
+				isHomePageActive = true;
+				cleanup();
+				fetchRandomMovie(); // Starts the (now optimized) fetch immediately
+				attachButtonListeners();
 				initVolumeControl();
-                console.log("Slideshow initialized on homepage.");
-            }
-            navigationInterval = setInterval(checkNavigation, 250);
-            console.log("Navigation check interval started.");
-        }, { passive: true });
+				console.log("Slideshow initialized immediately.");
+			}
+			
+			navigationInterval = setInterval(checkNavigation, 250);
+			console.log("Navigation check interval started.");
+		})();
 
         // Expose controlYouTubePlayer to the global window scope
         window.controlYouTubePlayer = {
